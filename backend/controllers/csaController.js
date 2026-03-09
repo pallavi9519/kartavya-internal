@@ -227,12 +227,171 @@ const addDonationsToCSM = asyncHandler(async (req, res) => {
   }
 });
 
+// @route GET /api/allotment/donation-pipeline
+// Get unprocessed verified donations grouped by user
+const getDonationPipeline = asyncHandler(async (req, res) => {
+  try {
+    const Donation = require("../models/Donation");
+    
+    // Find all verified but unprocessed donations
+    const donations = await Donation.find({
+      verified: true,
+      rejected: false,
+      processed: false,
+    })
+      .populate("user", "name email batch")
+      .populate("studentsToSponsor", "studentName rollNumber class centre school")
+      .lean();
+
+    // Filter out donations with null user and log them
+    const validDonations = donations.filter((donation) => {
+      if (!donation.user) {
+        console.warn(`Skipping donation ${donation._id} - user is null`);
+        return false;
+      }
+      return true;
+    });
+
+    // Group donations by user
+    const groupedByUser = {};
+    validDonations.forEach((donation) => {
+      if (!groupedByUser[donation.user._id]) {
+        groupedByUser[donation.user._id] = {
+          userId: donation.user._id,
+          userName: donation.user.name,
+          userEmail: donation.user.email,
+          userBatch: donation.user.batch,
+          donations: [],
+        };
+      }
+      groupedByUser[donation.user._id].donations.push(donation);
+    });
+
+    const result = Object.values(groupedByUser);
+
+    // Enrich with current sponsored students count
+    for (const group of result) {
+      const user = await User.findById(group.userId).select("sponsoredStudents");
+      group.currentSponsoredCount = user?.sponsoredStudents?.length || 0;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Error fetching donation pipeline:", error);
+    res.status(500).json({
+      message: "Failed to fetch donation pipeline",
+      error: error.message,
+    });
+  }
+});
+
+// @route PATCH /api/allotment/process-donation
+// Process a donation with sponsorship logic
+const processDonation = asyncHandler(async (req, res) => {
+  const { donationId, sponsorId } = req.body;
+
+  try {
+    const Donation = require("../models/Donation");
+    
+    const donation = await Donation.findById(donationId);
+    if (!donation) {
+      return res.status(404).json({ message: "Donation not found" });
+    }
+
+    // Validate numChild
+    if (donation.numChild === null || donation.numChild === undefined) {
+      return res.status(400).json({ message: "Invalid donation: numChild is not set" });
+    }
+
+    const sponsor = await User.findById(sponsorId);
+    if (!sponsor) {
+      return res.status(404).json({ message: "Sponsor not found" });
+    }
+
+    const newCount = donation.numChild;
+    const currentCount = sponsor.sponsoredStudents?.length || 0;
+    
+    console.log(`Processing donation ${donationId}: newCount=${newCount}, currentCount=${currentCount}`);
+
+    // Case 1: Increase in sponsorship (newCount > currentCount)
+    if (newCount > currentCount) {
+      const extraChildren = newCount - currentCount;
+      
+      // Add to CSM table for new allotment
+      const csm = await ChildSponsorMap.findOne({ user: sponsorId });
+      if (csm) {
+        csm.donations.push({
+          donationId: donationId,
+          date: new Date(),
+          numChild: extraChildren,
+        });
+        await csm.save();
+      } else {
+        const newCSM = new ChildSponsorMap({
+          user: sponsorId,
+          name: sponsor.name,
+          donations: [{
+            donationId: donationId,
+            date: new Date(),
+            numChild: extraChildren,
+          }],
+        });
+        await newCSM.save();
+      }
+    }
+    // Case 2: Decrease in sponsorship (newCount < currentCount)
+    else if (newCount < currentCount) {
+      const studentsToDeallot = currentCount - newCount;
+      
+      // Get the students to deallot (last added ones)
+      const studentsToRemove = sponsor.sponsoredStudents.slice(-studentsToDeallot);
+      
+      for (const studentId of studentsToRemove) {
+        // Remove sponsor from student
+        await Student.updateOne(
+          { _id: studentId },
+          { $pull: { sponsorId: sponsorId } }
+        );
+      }
+      
+      // Update sponsor's sponsored students list
+      sponsor.sponsoredStudents = sponsor.sponsoredStudents.slice(0, newCount);
+      await sponsor.save();
+    }
+    // Case 3: No change (newCount == currentCount)
+    // No action needed, just mark as processed
+
+    // Mark donation as processed
+    console.log(`Saving donation ${donationId} with processed=true`);
+    donation.processed = true;
+    const savedDonation = await donation.save();
+    console.log(`Donation saved successfully:`, savedDonation.processed);
+
+    res.status(200).json({
+      success: true,
+      message: "Donation processed successfully!",
+      data: { donationId, processed: true }
+    });
+  } catch (error) {
+    console.error("Error processing donation:", error);
+    res.status(500).json({
+      message: "Failed to process donation",
+      error: error.message,
+    });
+  }
+});
+
 module.exports = {
   getVerifiedDonations,
   getChildTobeAlloted,
   allotChild,
   deAllotChild,
   addDonationsToCSM,
+  getDonationPipeline,
+  processDonation,
 };
 
 // donation_id = 679bbe64100a5ecc13b97481

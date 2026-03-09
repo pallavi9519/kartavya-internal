@@ -42,6 +42,20 @@ const DonationSchema = new Schema({
     type: Number,
     default: 0,
   },
+  studentsToSponsor: [
+    {
+      type: Schema.Types.ObjectId,
+      ref: "Student",
+    },
+  ],
+  processed: {
+    type: Boolean,
+    default: false,
+  },
+  academicYear: {
+    type: String,
+    required: false,
+  },
 }, {timestamps: true});
 
 module.exports = mongoose.model("Donation", DonationSchema);
