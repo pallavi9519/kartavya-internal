@@ -89,41 +89,22 @@ const getUserById = async (req, res) => {
 const getAllSponsors = async (req, res) => {
   try {
     console.log('Getting all sponsors...');
-    const Student = require("../models/Student");
-
-    // Fetch all users who could be sponsors
     const sponsors = await User.find()
-      .select('_id name email contactNumber dateOfBirth gender currentJob totalDonation profileImage')
-      .lean();
-
-    // For each sponsor, query the Student collection directly for the source of truth
-    const sponsorsWithCounts = await Promise.all(
-      sponsors.map(async (sponsor) => {
-        const [studentCount, sponsoredStudents] = await Promise.all([
-          Student.countDocuments({ sponsorId: sponsor._id }),
-          Student.find(
-            { sponsorId: sponsor._id },
-            "studentName rollNumber class centre school profilePhoto sponsorshipStatus"
-          ).lean()
-        ]);
-
-        return {
-          ...sponsor,
-          sponsoredStudents,
-          studentCount
-        };
+      .populate({
+        path: "sponsoredStudents",
+        select: "studentName rollNumber class centre school profilePhoto sponsorshipStatus"
       })
-    );
-
+      .select('name email contactNumber dateOfBirth gender currentJob totalDonation sponsoredStudents profileImage')
+      .lean();
+    
     // Sort sponsors by number of sponsored students in descending order
-    const sortedSponsors = sponsorsWithCounts.sort((a, b) =>
-      (b.studentCount || 0) - (a.studentCount || 0)
+    const sortedSponsors = sponsors.sort((a, b) => 
+      (b.sponsoredStudents?.length || 0) - (a.sponsoredStudents?.length || 0)
     );
-
-    console.log('Found sponsors count:', sortedSponsors.length);
+    
+    console.log('Found sponsors:', sortedSponsors);
     res.status(200).json(sortedSponsors);
   } catch (err) {
-    console.error("getAllSponsors error:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
